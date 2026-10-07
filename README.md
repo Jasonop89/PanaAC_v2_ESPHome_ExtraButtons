@@ -106,6 +106,10 @@ created as separate HA swing entities.
 | `supports_cool` / `supports_heat` / `supports_fan_only` | true / false / false | Advertise those HVAC modes. |
 | `supports_quiet` | false | Add the Quiet fan level. |
 | `supports_powerful` / `supports_eco` | false / false | Native climate advertises built-in None/Boost/Eco presets; v2 MQTT advertises None/Powerful/Eco. Powerful also adds a coupled Powerful fan mode. Presets are mutually exclusive and valid in Auto/Cool/Dry. |
+| `supports_nanoe_g`                                      | false                | nanoe-G on/off (the remote's nanoe-G button). Adds a `nanoe_g` flag to the transmitted state frame, decoded from the physical remote and exposed over MQTT (`nanoe_g`). |
+| `supports_sleep`                                        | false                | SLEEP button. Each press sends the next of the 11 frames the remote cycles through (`send_sleep()` / MQTT `{"sleep": true}`). |
+| `supports_timer`                                        | false                | ON/OFF timers. Requires `time_id` (the remote's timer frames carry the clock). |
+| `time_id`                                               | *(none)*             | `time:` component used as the clock for timer frames. |
 | `fan_5level` | false | 5 fan levels (Level 1…5) vs 3 (Level 1/3/5). |
 | `swing_horizontal` | false | Enable horizontal swing + the Swing Horizontal select. |
 | `temp_step` | 1.0 | Visual temperature step (0.5 or 1.0). |
@@ -128,6 +132,40 @@ With `topic_prefix: panaac_v2/esphome-panaac-v2`:
 
 Commands are partial JSON, e.g. `{"fan_mode": "Level 2"}`. See [DESIGN.md](DESIGN.md) for the
 full topic contract, payloads, and the reconnect-republish behaviour.
+
+## Extra remote functions: nanoe-G, Sleep and timers
+
+Enable them with `supports_nanoe_g`, `supports_sleep` and `supports_timer` (timers also need `time_id`, a `time:`
+component such as `homeassistant`, because the remote's timer frames carry the current clock). The example YAMLs expose
+them as Home Assistant entities with template `switch` / `button` / `number` entities that call public methods of the
+component:
+
+| Function | Lambda API | MQTT (v2 mode, `<topic_prefix>/set`) |
+|---|---|---|
+| nanoe-G on/off | `set_nanoe_g(true\|false)` | `{"nanoe_g": true}` (or `"on"`/`"off"`); reported in `state` |
+| Sleep | `send_sleep()` (next step), `send_sleep_step(0..10)` | `{"sleep": true}` (next step) or `{"sleep": 3}` |
+| ON / OFF timer | `set_on_timer(minutes)`, `set_off_timer(minutes)` (minutes after 00:00) | `{"on_timer": "07:00"}`, `{"off_timer": "06:00"}`, `"off"` to clear; reported in `state` |
+| Cancel timers | `cancel_timers()` | `{"on_timer": "off", "off_timer": "off"}` |
+
+`traits` advertises `supports_nanoe_g` / `supports_sleep` / `supports_timer`; the PanaAC v2 HA integration ignores keys it
+does not know, so a card for these needs an integration update.
+
+How it behaves (reverse-engineered from a Panasonic inverter remote with a *nanoe-G* button, see DESIGN.md):
+- **nanoe-G** is a persistent flag in every frame. It is not carried in timer frames (the clock shares that byte). It is
+  not restored across an ESP reboot.
+- **Sleep** is a cycle of 11 distinct frames (each press of the remote's SLEEP button sends the next one); the component
+  steps through them the same way. What each step means on the AC is not known, and the AC does not report it back.
+- **Timers**: while a timer is enabled every transmitted frame carries the timers and the clock, so changing temperature
+  etc. does not drop them. If the clock is not valid yet, a plain frame is sent instead (and a warning is logged). Timers
+  set with the physical remote are decoded into `state`; CANCEL on the physical remote is not mirrored.
+
+## Host test
+
+`tests/host/frame_test.cpp` checks the frame builder without ESPHome (g++ only):
+
+```
+g++ -std=c++20 -Wall -Wextra -Itests/host/stubs -Iesphome/components/panaac_v2 tests/host/frame_test.cpp -o /tmp/frame_test && /tmp/frame_test
+```
 
 ## More documentation
 

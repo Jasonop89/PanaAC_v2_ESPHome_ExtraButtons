@@ -93,8 +93,76 @@ panaac_v2:
   supports_quiet: true
   supports_powerful: true
   supports_eco: true
+  supports_nanoe_g: true  # nanoe-G button on the remote (byte 17 bit 1 of the state frame)
+  supports_sleep: true    # SLEEP button: each press sends the next captured step (11-step cycle)
+  supports_timer: true    # ON/OFF timers; the remote's timer frames carry the clock, so time_id is required
+  time_id: ha_time
   fan_5level: true
   swing_horizontal: true
   temp_step: 0.5
   ir_control: true
   sensor: room_temp
+  # Keep the nanoe-G switch (below) in sync when nanoe-G changes via MQTT or the physical remote.
+  on_state:
+    - switch.template.publish:
+        id: panaac_nanoe_g
+        state: !lambda 'return id(panaac_v2_climate).ac_state.nanoe_g;'
+
+# nanoe-G, SLEEP and timers as Home Assistant entities. These call public methods of the panaac_v2
+# component, so they work in both v1-native and v2-MQTT mode. (In v2 MQTT mode you can also send
+# {"nanoe_g": true} / {"sleep": true} to the <topic_prefix>/set topic.)
+switch:
+  - platform: template
+    name: "nanoe-G"
+    id: panaac_nanoe_g
+    icon: mdi:air-purifier
+    optimistic: true
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: id(panaac_v2_climate).set_nanoe_g(true);
+    turn_off_action:
+      - lambda: id(panaac_v2_climate).set_nanoe_g(false);
+
+button:
+  - platform: template
+    name: "Sleep"
+    icon: mdi:power-sleep
+    on_press:
+      - lambda: id(panaac_v2_climate).send_sleep();  # next step, like pressing the remote's button
+  - platform: template
+    name: "Cancel Timers"
+    icon: mdi:timer-off
+    on_press:
+      - lambda: id(panaac_v2_climate).cancel_timers();
+
+# Timers as Home Assistant entities: minutes after midnight (e.g. 420 = 07:00). Setting a value enables
+# that timer; "Cancel Timers" clears both. (In v2 MQTT mode you can also send {"on_timer": "07:00"},
+# {"off_timer": "06:00"} or {"on_timer": "off"} to the <topic_prefix>/set topic.)
+number:
+  - platform: template
+    name: "ON Timer (minutes after midnight)"
+    id: panaac_on_timer
+    min_value: 0
+    max_value: 1439
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    optimistic: true
+    set_action:
+      - lambda: id(panaac_v2_climate).set_on_timer(static_cast<uint16_t>(x));
+  - platform: template
+    name: "OFF Timer (minutes after midnight)"
+    id: panaac_off_timer
+    min_value: 0
+    max_value: 1439
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    optimistic: true
+    set_action:
+      - lambda: id(panaac_v2_climate).set_off_timer(static_cast<uint16_t>(x));
+
+# Clock for the timers (the Panasonic remote's timer frames include the current time).
+time:
+  - platform: homeassistant
+    id: ha_time

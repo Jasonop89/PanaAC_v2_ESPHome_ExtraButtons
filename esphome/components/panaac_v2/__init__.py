@@ -14,6 +14,7 @@
 
 import esphome.codegen as cg
 from esphome.components import climate, remote_base, select, sensor
+from esphome.components import time as time_
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import (
@@ -25,6 +26,7 @@ from esphome.const import (
     CONF_MQTT_ID,
     CONF_NAME,
     CONF_SENSOR,
+    CONF_TIME_ID,
 )
 from esphome.components.remote_base import CONF_RECEIVER_ID, CONF_TRANSMITTER_ID
 from esphome.types import ConfigType
@@ -55,6 +57,9 @@ CONF_SUPPORTS_FAN_ONLY = "supports_fan_only"
 CONF_SUPPORTS_QUIET = "supports_quiet"
 CONF_SUPPORTS_POWERFUL = "supports_powerful"
 CONF_SUPPORTS_ECO = "supports_eco"
+CONF_SUPPORTS_NANOE_G = "supports_nanoe_g"
+CONF_SUPPORTS_SLEEP = "supports_sleep"
+CONF_SUPPORTS_TIMER = "supports_timer"
 CONF_FAN_5LEVEL = "fan_5level"
 CONF_SWING_HORIZONTAL = "swing_horizontal"
 CONF_TEMP_STEP = "temp_step"
@@ -83,6 +88,10 @@ CONFIG_SCHEMA = climate.climate_schema(PanaACV2Climate).extend({
     cv.Optional(CONF_SUPPORTS_QUIET, default=False): cv.boolean,
     cv.Optional(CONF_SUPPORTS_POWERFUL, default=False): cv.boolean,
     cv.Optional(CONF_SUPPORTS_ECO, default=False): cv.boolean,
+    cv.Optional(CONF_SUPPORTS_NANOE_G, default=False): cv.boolean,
+    cv.Optional(CONF_SUPPORTS_SLEEP, default=False): cv.boolean,
+    cv.Optional(CONF_SUPPORTS_TIMER, default=False): cv.boolean,
+    cv.Optional(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),
     cv.Optional(CONF_FAN_5LEVEL, default=False): cv.boolean,
     cv.Optional(CONF_SWING_HORIZONTAL, default=False): cv.boolean,
     cv.Optional(CONF_TEMP_STEP, default=1.0): _validate_temp_step,
@@ -166,6 +175,11 @@ async def to_code(config):
     cg.add(var.set_supports_quiet(config[CONF_SUPPORTS_QUIET]))
     cg.add(var.set_supports_powerful(config[CONF_SUPPORTS_POWERFUL]))
     cg.add(var.set_supports_eco(config[CONF_SUPPORTS_ECO]))
+    cg.add(var.set_supports_nanoe_g(config[CONF_SUPPORTS_NANOE_G]))
+    cg.add(var.set_supports_sleep(config[CONF_SUPPORTS_SLEEP]))
+    cg.add(var.set_supports_timer(config[CONF_SUPPORTS_TIMER]))
+    if time_id := config.get(CONF_TIME_ID):
+        cg.add(var.set_time(await cg.get_variable(time_id)))
     cg.add(var.set_fan_5level(config[CONF_FAN_5LEVEL]))
     cg.add(var.set_swing_horizontal(config[CONF_SWING_HORIZONTAL]))
     cg.add(var.set_temp_step(config[CONF_TEMP_STEP]))
@@ -199,6 +213,12 @@ def _final_validate(config: ConfigType) -> ConfigType:
     mqtt: block` at runtime. Fail generation here instead, so the misconfiguration is caught
     before flashing.
     """
+    if config.get(CONF_SUPPORTS_TIMER) and CONF_TIME_ID not in config:
+        raise cv.Invalid(
+            "`supports_timer: true` needs `time_id`: the Panasonic remote's timer frames carry the "
+            "current clock, so add a `time:` component (e.g. platform: homeassistant or sntp) and "
+            "reference it with `time_id`."
+        )
     if CONF_TOPIC_PREFIX in config:
         full_config = fv.full_config.get()
         if not full_config.get("mqtt"):

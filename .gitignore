@@ -4,3 +4,4 @@ secrets.yaml
 __pycache__/
 test/results/
 test/runner_config.json
+tests/host

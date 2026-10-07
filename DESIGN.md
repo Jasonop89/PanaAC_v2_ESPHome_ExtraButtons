@@ -129,6 +129,14 @@ restart cannot leave HA with a stale or empty entity.
 }
 ```
 
+### Optional extra fields
+
+When `supports_nanoe_g` is set, `state` carries `"nanoe_g": true|false` and `set` accepts `"nanoe_g": true|false|"on"|"off"`
+(part of the single atomic emit). When `supports_timer` is set, `state` carries `"on_timer"` / `"off_timer"` (`"HH:MM"` or
+`"off"`) and `set` accepts the same values (also part of the atomic emit). When `supports_sleep` is set, `set` accepts
+`{"sleep": true}` (next step) or `{"sleep": N}` (step 0..10), sent ~400 ms after any state frame in the same command.
+`traits` advertises `supports_nanoe_g` / `supports_sleep` / `supports_timer`.
+
 ### Command payload
 
 Commands are **partial**: any subset of the state keys may be supplied. Only the
@@ -185,6 +193,41 @@ Encoding and decoding follow the byte positions and masks defined in
 - quiet bit in byte 13.
 
 The carrier is 38 kHz when `ir_control: true`.
+
+## Extra remote functions: nanoe-G, Sleep, timers
+
+Captured with an ESPHome `remote_receiver` (`dump: aeha`) from a Panasonic inverter remote (buttons: Powerful, Quiet,
+nanoe-G, Sleep, Timer ON/OFF/SET/CANCEL, Clock). The AEHA decoder returns MSB-first bytes; bit-reverse each byte to get
+the protocol bytes used throughout this document. Indices below are into the 19-byte second frame. All of this is checked
+by `tests/host/frame_test.cpp`, which reproduces the captured frames byte for byte.
+
+**nanoe-G** - byte 17 bit 1 (`0x02`), a persistent flag: nanoe-G on -> TEMP up -> nanoe-G off -> TEMP up kept the bit on
+for the first two frames and off for the last two. The remote's normal frames also always carry byte 17 bit 7 (`0x80`);
+its timer frames clear it. With `supports_nanoe_g` the encoder mirrors the remote (`0x80`, plus `0x02` when on); without it
+byte 17 is unchanged from the original encoder.
+
+**Timers** - byte 5 bit 1 (`0x02`) = ON timer enabled, bit 2 (`0x04`) = OFF timer enabled (both: `0x0F` in AUTO on the
+remote). Each timer is a 12-bit field whose bit 11 (`0x800`) is always set; the low 11 bits are minutes since 00:00 and
+`0x600` means "none": ON = `byte10 | (byte11 & 0x0F) << 8`, OFF = `(byte11 >> 4) | byte12 << 4`. Captured: ON 07:00 ->
+`A4 .9`, ON 07:00 + OFF 06:00 -> `A4 89 96`. A frame that carries timers also has byte 15 = `0x80` (normal frames: `0x89`)
+and the remote's clock in byte 16 (low 8 bits) and byte 17 bits 0-2 (high bits), byte 17 bit 7 clear. The remote's clock
+was a constant ~16 min behind real time in two sessions, i.e. it simply keeps whatever time it was set to; this component
+sends the real time from `time_id`. While a timer is enabled every transmitted frame uses this layout so that other
+commands do not drop the timers; with a timer disabled the field is sent as "none". Disabled timers the remote remembers
+(stale values in the disabled field) are not reproduced.
+
+**Cancel** - the remote's CANCEL produced two different things in two sessions: a normal-length timer-layout frame with
+both enable bits cleared (byte 17 = `0x42`, bit 6 unexplained) and, with both timers set, a short frame
+`02 20 E0 04 80 B6 32 6E`. This component sends the first form (enable bits cleared, fields "none"). Whether the AC
+accepts it as a cancel is verified only on the remote side.
+
+**Sleep** - not a state bit. The remote sends the fixed first frame followed by a short 8-byte frame
+`02 20 E0 04 80 <step> 10 <checksum>` (checksum = low byte of the sum of the first seven). Eleven presses gave steps
+`1F 1E 1C 1A 18 16 14 12 10 0E 00`; the component steps through them the same way and wraps after the last (the wrap is an
+assumption). Their meaning on the AC is not known.
+
+Not reproduced or unknown: the `80 B6 32` cancel frame, what each Sleep step means, and byte 5 bit 3 (`0x08`, set by the
+remote in AUTO, never emitted here).
 
 ## Startup behaviour
 

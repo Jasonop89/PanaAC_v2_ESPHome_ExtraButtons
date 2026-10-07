@@ -85,6 +85,11 @@ PanaACV2Climate::PanaACV2Climate() {
   this->ac_state.last_swing_v_pos = PANAAC_SWINGV_MIDDLE;
   this->ac_state.last_swing_h_pos = PANAAC_SWINGH_MIDDLE;
   this->ac_state.preset = PANAAC_PRESET_NONE;
+  this->ac_state.nanoe_g = false;
+  this->ac_state.on_timer_enabled = false;
+  this->ac_state.off_timer_enabled = false;
+  this->ac_state.on_timer_minutes = 0;
+  this->ac_state.off_timer_minutes = 0;
 }
 
 // ---------------- setup / loop ----------------
@@ -303,6 +308,9 @@ void PanaACV2Climate::dump_config() {
   ESP_LOGCONFIG(TAG, "  Supports quiet: %s", YESNO(this->supports_quiet_));
   ESP_LOGCONFIG(TAG, "  Supports powerful: %s", YESNO(this->supports_powerful_));
   ESP_LOGCONFIG(TAG, "  Supports eco: %s", YESNO(this->supports_eco_));
+  ESP_LOGCONFIG(TAG, "  Supports nanoe-G: %s", YESNO(this->supports_nanoe_g_));
+  ESP_LOGCONFIG(TAG, "  Supports sleep: %s", YESNO(this->supports_sleep_));
+  ESP_LOGCONFIG(TAG, "  Supports timer: %s", YESNO(this->supports_timer_));
   ESP_LOGCONFIG(TAG, "  Swing horizontal: %s", YESNO(this->swing_horizontal_));
   ESP_LOGCONFIG(TAG, "  IR control (38kHz): %s", YESNO(this->ir_control_));
   if (this->sensor_ != nullptr) {
@@ -655,6 +663,80 @@ void PanaACV2Climate::apply_swingh_select_(SwingHPos pos) {
   this->transmit_data_();
 }
 
+// ---------------- Extra remote functions (nanoe-G, Sleep) ----------------
+
+void PanaACV2Climate::set_nanoe_g(bool on) {
+  if (!this->supports_nanoe_g_) {
+    ESP_LOGW(TAG, "nanoe-G is not enabled (set supports_nanoe_g: true)");
+    return;
+  }
+  this->ac_state.nanoe_g = on;
+  this->publish_state_by_mode_();  // reflect before the blocking IR send
+  this->transmit_data_();
+}
+
+void PanaACV2Climate::send_sleep() {
+  this->send_sleep_step(static_cast<uint8_t>((this->sleep_step_ + 1) % PANAAC_SLEEP_STEPS.size()));
+}
+
+void PanaACV2Climate::send_sleep_step(uint8_t step) {
+  if (!this->supports_sleep_) {
+    ESP_LOGW(TAG, "Sleep is not enabled (set supports_sleep: true)");
+    return;
+  }
+  if (step >= PANAAC_SLEEP_STEPS.size()) {
+    ESP_LOGW(TAG, "Sleep step %u out of range (0..%u)", step, static_cast<unsigned>(PANAAC_SLEEP_STEPS.size() - 1));
+    return;
+  }
+  this->sleep_step_ = step;
+  const std::array<uint8_t, 8> frame = build_sleep_frame(step);
+  ESP_LOGD(TAG, "Sending SLEEP step %u", step);
+  this->transmit_frames_(std::span<const uint8_t>(frame));
+}
+
+void PanaACV2Climate::set_on_timer(uint16_t minutes) {
+  if (!this->supports_timer_) {
+    ESP_LOGW(TAG, "Timers are not enabled (set supports_timer: true and time_id)");
+    return;
+  }
+  if (minutes >= PANAAC_TIMER_MAX_MINUTES) {
+    ESP_LOGW(TAG, "ON timer %u out of range (0..1439 minutes)", minutes);
+    return;
+  }
+  this->ac_state.on_timer_enabled = true;
+  this->ac_state.on_timer_minutes = minutes;
+  this->publish_state_by_mode_();  // reflect before the blocking IR send
+  this->transmit_data_();
+}
+
+void PanaACV2Climate::set_off_timer(uint16_t minutes) {
+  if (!this->supports_timer_) {
+    ESP_LOGW(TAG, "Timers are not enabled (set supports_timer: true and time_id)");
+    return;
+  }
+  if (minutes >= PANAAC_TIMER_MAX_MINUTES) {
+    ESP_LOGW(TAG, "OFF timer %u out of range (0..1439 minutes)", minutes);
+    return;
+  }
+  this->ac_state.off_timer_enabled = true;
+  this->ac_state.off_timer_minutes = minutes;
+  this->publish_state_by_mode_();  // reflect before the blocking IR send
+  this->transmit_data_();
+}
+
+void PanaACV2Climate::cancel_timers() {
+  if (!this->supports_timer_) {
+    ESP_LOGW(TAG, "Timers are not enabled (set supports_timer: true and time_id)");
+    return;
+  }
+  this->ac_state.on_timer_enabled = false;
+  this->ac_state.off_timer_enabled = false;
+  this->ac_state.on_timer_minutes = 0;
+  this->ac_state.off_timer_minutes = 0;
+  this->publish_state_by_mode_();
+  this->transmit_data_(true);  // timer layout with the enable bits cleared
+}
+
 // ---------------- v2 MQTT swing set helpers ----------------
 
 #ifdef USE_MQTT
@@ -713,6 +795,26 @@ void PanaACV2Climate::publish_state_() {
     root["swing_mode"] = swing_v_pos_to_str(this->ac_state.swing_v_pos);
     if (this->swing_horizontal_)
       root["swing_horizontal_mode"] = swing_h_pos_to_str(this->ac_state.swing_h_pos);
+    if (this->supports_nanoe_g_)
+      root["nanoe_g"] = this->ac_state.nanoe_g;
+    if (this->supports_timer_) {
+      char on_buf[8];
+      char off_buf[8];
+      if (this->ac_state.on_timer_enabled) {
+        snprintf(on_buf, sizeof(on_buf), "%02u:%02u", static_cast<unsigned>(this->ac_state.on_timer_minutes / 60),
+                 static_cast<unsigned>(this->ac_state.on_timer_minutes % 60));
+        root["on_timer"] = on_buf;
+      } else {
+        root["on_timer"] = "off";
+      }
+      if (this->ac_state.off_timer_enabled) {
+        snprintf(off_buf, sizeof(off_buf), "%02u:%02u", static_cast<unsigned>(this->ac_state.off_timer_minutes / 60),
+                 static_cast<unsigned>(this->ac_state.off_timer_minutes % 60));
+        root["off_timer"] = off_buf;
+      } else {
+        root["off_timer"] = "off";
+      }
+    }
     if (!std::isnan(this->current_temperature))
       root["current_temperature"] = this->current_temperature;
     root["available"] = true;
@@ -775,6 +877,14 @@ void PanaACV2Climate::publish_traits_() {
       h_modes.add(STR_SWINGH_RIGHT);
       h_modes.add(STR_SWINGH_RIGHTMAX);
     }
+
+    // Extra remote functions (additive keys; consumers that don't know them can ignore them).
+    if (this->supports_nanoe_g_)
+      root["supports_nanoe_g"] = true;
+    if (this->supports_sleep_)
+      root["supports_sleep"] = true;
+    if (this->supports_timer_)
+      root["supports_timer"] = true;
 
     root["min_temp"] = PANAAC_TEMP_MIN;
     root["max_temp"] = PANAAC_TEMP_MAX;
@@ -853,83 +963,140 @@ void PanaACV2Climate::on_set_json_(const std::string &topic, JsonObject root) {
       swing_changed = true;
   }
 
+  // nanoe-G: accepts true/false or "on"/"off". It is carried in the state frame, so it joins the
+  // single emit below.
+  if (this->supports_nanoe_g_) {
+    bool nanoe_requested = false;
+    bool has_nanoe = false;
+    if (root["nanoe_g"].is<bool>()) {
+      nanoe_requested = root["nanoe_g"].as<bool>();
+      has_nanoe = true;
+    } else if (root["nanoe_g"].is<const char *>()) {
+      const char *v = root["nanoe_g"];
+      if (strcasecmp(v, "on") == 0 || strcasecmp(v, "true") == 0) {
+        nanoe_requested = true;
+        has_nanoe = true;
+      } else if (strcasecmp(v, "off") == 0 || strcasecmp(v, "false") == 0) {
+        nanoe_requested = false;
+        has_nanoe = true;
+      } else {
+        ESP_LOGW(TAG, "Unsupported nanoe_g value: %s", v);
+      }
+    }
+    if (has_nanoe && nanoe_requested != this->ac_state.nanoe_g) {
+      this->ac_state.nanoe_g = nanoe_requested;
+      this->pending_change_ = true;
+    }
+  }
+
+  // Timers: "on_timer" / "off_timer" accept "HH:MM" (enable) or "off". They travel in the state
+  // frame, so they join the single emit below; disabling the last enabled timer forces one timer-layout
+  // frame (with the enable bits cleared) so the AC actually cancels it.
+  if (this->supports_timer_) {
+    bool timer_cancel = false;
+    auto apply_timer = [&](const char *key, bool &enabled, uint16_t &minutes) {
+      if (!root[key].is<const char *>())
+        return;
+      const char *v = root[key];
+      uint16_t parsed = 0;
+      if (parse_hhmm(v, parsed)) {
+        if (!enabled || minutes != parsed) {
+          enabled = true;
+          minutes = parsed;
+          this->pending_change_ = true;
+        }
+      } else if (strcasecmp(v, "off") == 0 || strcasecmp(v, "none") == 0) {
+        if (enabled) {
+          enabled = false;
+          minutes = 0;
+          this->pending_change_ = true;
+          timer_cancel = true;
+        }
+      } else {
+        ESP_LOGW(TAG, "Unsupported %s value: %s (use \"HH:MM\" or \"off\")", key, v);
+      }
+    };
+    apply_timer("on_timer", this->ac_state.on_timer_enabled, this->ac_state.on_timer_minutes);
+    apply_timer("off_timer", this->ac_state.off_timer_enabled, this->ac_state.off_timer_minutes);
+    if (timer_cancel)
+      this->timer_cancel_pending_ = true;
+  }
+
   // Exactly one emit for the whole command, only if something actually changed.
   this->mqtt_command_active_ = false;
-  if (this->pending_change_ || swing_changed) {
+  const bool state_emitted = this->pending_change_ || swing_changed;
+  if (state_emitted) {
     this->sync_to_climate_();
     this->publish_state_by_mode_();  // reflect before the blocking IR send
     this->update_selects_();
     this->transmit_data_();
+  }
+
+  // SLEEP is a stepping command frame, not state: true = next step (like pressing the remote's
+  // button), a number 0..10 = that step. If a state frame was just sent, give the AC a moment
+  // before the second burst.
+  if (this->supports_sleep_) {
+    int sleep_request = -1;  // -1 = none, -2 = next step, >= 0 = explicit step
+    if (root["sleep"].is<bool>()) {
+      if (root["sleep"].as<bool>())
+        sleep_request = -2;
+    } else if (root["sleep"].is<int>()) {
+      sleep_request = root["sleep"].as<int>();
+      if (sleep_request < 0)
+        sleep_request = 255;  // rejected by send_sleep_step()
+    }
+    if (sleep_request != -1) {
+      auto do_sleep = [this, sleep_request]() {
+        if (sleep_request == -2)
+          this->send_sleep();
+        else
+          this->send_sleep_step(static_cast<uint8_t>(sleep_request > 255 ? 255 : sleep_request));
+      };
+      if (state_emitted)
+        this->set_timeout("panaac_sleep", 400, do_sleep);
+      else
+        do_sleep();
+    }
   }
 }
 #endif  // USE_MQTT
 
 // ---------------- IR transmit ----------------
 
-void PanaACV2Climate::transmit_data_() {
-  static const std::array<uint8_t, 8> FIRST_FRAME = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06};
-  std::array<uint8_t, 19> second_frame = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
-                                          0x00, 0x0E, 0xE0, 0x00, 0x00, 0x89, 0x00, 0x00, 0x00};
+FrameCaps PanaACV2Climate::frame_caps_() const {
+  FrameCaps caps;
+  caps.supports_quiet = this->supports_quiet_;
+  caps.supports_powerful = this->supports_powerful_;
+  caps.supports_eco = this->supports_eco_;
+  caps.supports_nanoe_g = this->supports_nanoe_g_;
+  caps.swing_horizontal = this->swing_horizontal_;
+  return caps;
+}
 
-  // power & mode
-  switch (this->ac_state.mode) {
-    case climate::CLIMATE_MODE_COOL:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_ON;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_COOL;
-      break;
-    case climate::CLIMATE_MODE_HEAT:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_ON;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_HEAT;
-      break;
-    case climate::CLIMATE_MODE_DRY:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_ON;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_DRY;
-      break;
-    case climate::CLIMATE_MODE_FAN_ONLY:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_ON;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_FAN_ONLY;
-      break;
-    case climate::CLIMATE_MODE_AUTO:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_ON;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_AUTO;
-      break;
-    case climate::CLIMATE_MODE_OFF:
-    default:
-      second_frame[PANAAC_BYTEPOS_POWER] |= PANAAC_POWER_OFF;
-      second_frame[PANAAC_BYTEPOS_MODE] |= PANAAC_MODE_COOL;
-      break;
+TimerFrameInfo PanaACV2Climate::timer_frame_info_(bool force) {
+  TimerFrameInfo info;
+  if (!this->supports_timer_)
+    return info;
+  if (!force && !this->ac_state.on_timer_enabled && !this->ac_state.off_timer_enabled)
+    return info;
+#ifdef USE_TIME
+  if (this->time_ != nullptr) {
+    const auto now = this->time_->now();
+    if (now.is_valid()) {
+      info.include = true;
+      info.clock_minutes = static_cast<uint16_t>(now.hour * 60 + now.minute);
+      return info;
+    }
   }
+#endif
+  ESP_LOGW(TAG, "Timers are active but the clock is not valid (is time_id set and synced?); sending a plain frame");
+  return info;
+}
 
-  // temperature
-  uint8_t encoded_temp = static_cast<uint8_t>(this->ac_state.temp) - PANAAC_TEMP_MIN;
-  encoded_temp &= 0x0F;
-  second_frame[PANAAC_BYTEPOS_TEMP] = 0x20 | (encoded_temp << 1);
-  if (static_cast<uint8_t>(this->ac_state.temp) < this->ac_state.temp)
-    second_frame[PANAAC_BYTEPOS_TEMP] |= 0x01;
-
-  // fan
-  if (this->ac_state.fan_level == PANAAC_FAN_QUIET && this->supports_quiet_) {
-    second_frame[PANAAC_BYTEPOS_QUIET] |= PANAAC_FAN_QUIET;
-  }
-  second_frame[PANAAC_BYTEPOS_FAN] |= this->ac_state.fan_level;
-
-  // Panasonic preset bits. POWERFUL and ECO are mutually exclusive.
-  if (this->ac_state.preset == PANAAC_PRESET_POWERFUL && this->supports_powerful_)
-    second_frame[PANAAC_BYTEPOS_POWERFUL] |= PANAAC_POWERFUL;
-  else if (this->ac_state.preset == PANAAC_PRESET_ECO && this->supports_eco_)
-    second_frame[PANAAC_BYTEPOS_ECO] |= PANAAC_ECO;
-
-  // swing
-  second_frame[PANAAC_BYTEPOS_SWINGV] |= this->ac_state.swing_v_pos;
-  if (this->swing_horizontal_) {
-    second_frame[PANAAC_BYTEPOS_SWINGH] |= this->ac_state.swing_h_pos;
-  } else {
-    second_frame[PANAAC_BYTEPOS_SWINGH] |= PANAAC_SWINGH_NONE;
-  }
-
-  // checksum
-  for (uint8_t i = 0; i < 18; i++)
-    second_frame[18] += second_frame[i];
+void PanaACV2Climate::transmit_data_(bool force_timer_frame) {
+  const TimerFrameInfo timer = this->timer_frame_info_(force_timer_frame || this->timer_cancel_pending_);
+  this->timer_cancel_pending_ = false;
+  const std::array<uint8_t, 19> second_frame = build_state_frame(this->ac_state, this->frame_caps_(), timer);
 
 #if (ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE)
   char hex[3 * 19 + 1];
@@ -939,6 +1106,10 @@ void PanaACV2Climate::transmit_data_() {
   ESP_LOGV(TAG, "Sending Panasonic AC IR state: len = %d, data = [ %s]", second_frame.size(), hex);
 #endif
 
+  this->transmit_frames_(std::span<const uint8_t>(second_frame));
+}
+
+void PanaACV2Climate::transmit_frames_(std::span<const uint8_t> second_frame) {
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
   if (this->ir_control_)
@@ -947,7 +1118,7 @@ void PanaACV2Climate::transmit_data_() {
   // First frame
   data->mark(PANAAC_HEADER_MARK);
   data->space(PANAAC_HEADER_SPACE);
-  for (uint8_t b : FIRST_FRAME) {
+  for (uint8_t b : PANAAC_FIRST_FRAME) {
     for (uint8_t i_bit = 0; i_bit < 8; i_bit++) {
       data->mark(PANAAC_BIT_MARK);
       bool bit = b & (1 << i_bit);
@@ -1151,6 +1322,22 @@ bool PanaACV2Climate::decode_state_(std::span<const uint8_t> state_bytes, Climat
     ESP_LOGV(TAG, "Preset is unsupported or incompatible with the decoded HVAC mode");
     return false;
   }
+  // Timer/clock frames (byte 15 = 0x80) carry the remote's clock in bytes 16-17, which overlaps the
+  // nanoe-G bit, so for those frames keep the current nanoe-G state.
+  const TimerFields timers = decode_timer_fields(state_bytes.data());
+  if (!this->supports_nanoe_g_)
+    state.nanoe_g = false;
+  else if (timers.is_timer_frame)
+    state.nanoe_g = this->ac_state.nanoe_g;
+  else
+    state.nanoe_g = (state_bytes[PANAAC_BYTEPOS_NANOE_G] & PANAAC_NANOE_G) != 0;
+  if (this->supports_timer_) {
+    state.on_timer_enabled = timers.on_enabled;
+    state.off_timer_enabled = timers.off_enabled;
+    state.on_timer_minutes = timers.on_minutes;
+    state.off_timer_minutes = timers.off_minutes;
+  }
+
   // swing
   uint8_t swing_v = state_bytes[PANAAC_BYTEPOS_SWINGV] & 0x0F;
   uint8_t swing_h = state_bytes[PANAAC_BYTEPOS_SWINGH] & 0x0F;

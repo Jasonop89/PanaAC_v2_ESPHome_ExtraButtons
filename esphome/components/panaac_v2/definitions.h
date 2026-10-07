@@ -76,11 +76,37 @@ const uint8_t PANAAC_BYTEPOS_SWINGH = 9;
 const uint8_t PANAAC_BYTEPOS_QUIET = 13;
 const uint8_t PANAAC_BYTEPOS_POWERFUL = 13;
 const uint8_t PANAAC_BYTEPOS_ECO = 17;
+// nanoe-G: captured from a Panasonic inverter remote. It is a persistent state flag in byte 17
+// bit 1: set on every following frame (e.g. after TEMP up) until nanoe-G is pressed again.
+// The remote's normal frames also carry bit 7 (0x80) of byte 17; its timer/clock frames clear
+// bit 7 and use bits 0-2 for the clock's high bits instead, so bit 7 marks "normal frame, nanoe
+// flag valid". With supports_nanoe_g the encoder therefore always sends 0x80 (mirroring the remote).
+const uint8_t PANAAC_BYTEPOS_NANOE_G = 17;
+const uint8_t PANAAC_NANOE_FRAME_MARK = 0x80;
+
+// Timers (captured from the same remote; see DESIGN.md "Timers"). Byte 5 bit 1 / bit 2 enable the ON / OFF
+// timer; each timer is a 12-bit field (bit 11 always set, 0x600 = "none", otherwise minutes since
+// 00:00): ON = byte10 | (byte11 & 0x0F) << 8, OFF = (byte11 >> 4) | byte12 << 4. Frames that carry timers
+// also set byte 15 = 0x80 (normal frames: 0x89) and carry the remote's clock (minutes since 00:00) in
+// byte 16 (low) and byte 17 bits 0-2 (high); byte 17 bit 7 is clear in those frames.
+const uint8_t PANAAC_BYTEPOS_TIMER_ON = 10;
+const uint8_t PANAAC_BYTEPOS_TIMER_MIX = 11;
+const uint8_t PANAAC_BYTEPOS_TIMER_OFF = 12;
+const uint8_t PANAAC_BYTEPOS_TIMER_MARK = 15;
+const uint8_t PANAAC_BYTEPOS_CLOCK_LO = 16;
+const uint8_t PANAAC_BYTEPOS_CLOCK_HI = 17;
+const uint8_t PANAAC_TIMER_ON_FLAG = 0x02;
+const uint8_t PANAAC_TIMER_OFF_FLAG = 0x04;
+const uint8_t PANAAC_TIMER_FRAME_MARK = 0x80;
+const uint16_t PANAAC_TIMER_FIELD_FLAG = 0x800;
+const uint16_t PANAAC_TIMER_NONE = 0x600;
+const uint16_t PANAAC_TIMER_MAX_MINUTES = 24 * 60;
 
 // byte values
 const uint8_t PANAAC_POWER_MASK = 0x01;  // only bit 0 encodes power state
 const uint8_t PANAAC_POWERFUL = 0x01;
 const uint8_t PANAAC_ECO = 0x10;
+const uint8_t PANAAC_NANOE_G = 0x02;
 const uint8_t PANAAC_POWER_OFF = 0x00;   // bit 0 = 0 -> OFF
 const uint8_t PANAAC_POWER_ON = 0x01;    // bit 0 = 1 -> ON
 
@@ -159,6 +185,12 @@ struct ClimateState {
   SwingVPos last_swing_v_pos;
   SwingHPos last_swing_h_pos;
   Preset preset;
+  bool nanoe_g;  // nanoe-G air purifier flag (only meaningful when supports_nanoe_g is set)
+  // Timers (only meaningful when supports_timer is set). Minutes since 00:00, valid when enabled.
+  bool on_timer_enabled;
+  bool off_timer_enabled;
+  uint16_t on_timer_minutes;
+  uint16_t off_timer_minutes;
 };
 
 static const char *const STR_FAN_AUTO = "Auto";

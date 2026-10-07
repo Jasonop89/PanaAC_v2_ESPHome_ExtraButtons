@@ -18,6 +18,7 @@
 
 #include "definitions.h"
 #include "extra.h"
+#include "frame.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/remote_base/remote_base.h"
 #include "esphome/components/sensor/sensor.h"
@@ -30,6 +31,9 @@
 
 #ifdef USE_MQTT
 #include "esphome/components/mqtt/custom_mqtt_device.h"
+#endif
+#ifdef USE_TIME
+#include "esphome/components/time/real_time_clock.h"
 #endif
 
 namespace esphome::panaac_v2 {
@@ -76,6 +80,12 @@ class PanaACV2Climate : public climate::Climate,
   void set_supports_quiet(bool supports) { this->supports_quiet_ = supports; }
   void set_supports_powerful(bool supports) { this->supports_powerful_ = supports; }
   void set_supports_eco(bool supports) { this->supports_eco_ = supports; }
+  void set_supports_nanoe_g(bool supports) { this->supports_nanoe_g_ = supports; }
+  void set_supports_sleep(bool supports) { this->supports_sleep_ = supports; }
+  void set_supports_timer(bool supports) { this->supports_timer_ = supports; }
+#ifdef USE_TIME
+  void set_time(time::RealTimeClock *time) { this->time_ = time; }
+#endif
   void set_fan_5level(bool fan_5level) { this->fan_5level_ = fan_5level; }
   void set_swing_horizontal(bool swing_horizontal) { this->swing_horizontal_ = swing_horizontal; }
   void set_temp_step(float temp_step) { this->temp_step_ = temp_step; }
@@ -89,6 +99,24 @@ class PanaACV2Climate : public climate::Climate,
   /// `ac_state`, transmits the IR frame, publishes (by mode), and re-syncs the other select.
   void apply_swingv_select_(SwingVPos pos);
   void apply_swingh_select_(SwingHPos pos);
+
+  /// Extra remote functions. Each is a no-op (with a warning) unless enabled in the YAML
+  /// (`supports_nanoe_g` / `supports_sleep` / `supports_timer`). Usable from lambdas and template entities.
+  /// nanoe-G is a state flag carried in every transmitted frame: this updates ac_state, publishes
+  /// and transmits (it always transmits, so it also re-syncs an AC that drifted out of sync).
+  void set_nanoe_g(bool on);
+  /// SLEEP is a stepping command like the remote's button: each call sends the next of the 11 captured
+  /// steps (wrapping after the last). The AC does not report it back.
+  void send_sleep();
+  /// Send a specific SLEEP step (0..10, in the order the remote cycles through them).
+  void send_sleep_step(uint8_t step);
+  /// ON / OFF timers (minutes since 00:00, 0..1439). They need `time_id` (the remote's frames carry
+  /// the clock). While a timer is enabled every transmitted frame carries the timers and the clock;
+  /// nanoe-G is not carried in those frames.
+  void set_on_timer(uint16_t minutes);
+  void set_off_timer(uint16_t minutes);
+  /// Cancel both timers (sends the timer layout with the enable bits cleared, like the remote's CANCEL).
+  void cancel_timers();
 
   void setup() override;
   void dump_config() override;
@@ -106,7 +134,13 @@ class PanaACV2Climate : public climate::Climate,
   bool on_receive(remote_base::RemoteReceiveData data) override;
 
   // IR core (operate on ac_state).
-  void transmit_data_();
+  void transmit_data_(bool force_timer_frame = false);
+  /// Timer/clock info for the next state frame (include = false when timers are off or the clock is unknown).
+  TimerFrameInfo timer_frame_info_(bool force);
+  /// Transmit the fixed first frame followed by `second_frame` (19-byte state frame or the 8-byte
+  /// SLEEP frame). Blocks for the duration of the signal (~260 ms).
+  void transmit_frames_(std::span<const uint8_t> second_frame);
+  FrameCaps frame_caps_() const;
   bool decode_data_(remote_base::RemoteReceiveData data, std::array<uint8_t, 27> &state_bytes, size_t &state_len);
   bool decode_state_(std::span<const uint8_t> state_bytes, ClimateState &state);
   bool decode_and_apply_(std::span<const uint8_t> state_bytes);
@@ -139,6 +173,14 @@ class PanaACV2Climate : public climate::Climate,
   bool supports_heat_{false};
   bool supports_powerful_{false};
   bool supports_eco_{false};
+  bool supports_nanoe_g_{false};
+  bool supports_sleep_{false};
+  bool supports_timer_{false};
+  size_t sleep_step_{PANAAC_SLEEP_STEPS.size() - 1};  // last step sent; the first press sends step 0
+#ifdef USE_TIME
+  time::RealTimeClock *time_{nullptr};
+#endif
+  bool timer_cancel_pending_{false};
   bool supports_fan_only_{false};
   bool supports_quiet_{false};
   bool fan_5level_{false};

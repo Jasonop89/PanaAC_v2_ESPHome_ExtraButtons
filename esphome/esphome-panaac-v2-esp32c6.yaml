@@ -1,0 +1,88 @@
+substitutions:
+  device_name: "esphome-panaac-v2-c6"
+  device_friendlyname: "ESPHome_PanaAC_v2_ESP32C6"
+
+esphome:
+  name: "${device_name}"
+  friendly_name: "${device_friendlyname}"
+  name_add_mac_suffix: false
+
+# Load the panaac_v2 custom component from the sibling components/ folder.
+external_components:
+  - source: components
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+
+logger:
+
+# Native Home Assistant API — exposes the "(v1)" climate and swing selects.
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name}-ap"
+    password: !secret wifi_ap_password
+
+captive_portal:
+
+# v2 climate MQTT topics are consumed by the PanaAC v2 Home Assistant integration.
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_user
+  password: !secret mqtt_pass
+  discovery: false
+
+# Example ESP32-C6 DevKitC-1 wiring; check the silkscreen/pinout for your board.
+# GPIO14 = IR receiver data; GPIO18 = IR LED driver input. GPIO13 is reserved for USB JTAG.
+remote_receiver:
+  pin:
+    number: GPIO14
+    inverted: true
+  tolerance: 55%
+  id: ir_receiver
+  idle: 5ms
+
+remote_transmitter:
+  carrier_duty_percent: 50%
+  pin:
+    number: GPIO06
+  id: ir_transmitter
+  non_blocking: false
+
+# Optional example temperature sensor. Replace with a real sensor or remove this block.
+sensor:
+  - platform: template
+    name: "Room Temperature"
+    id: room_temp
+    lambda: return 26.5;
+    update_interval: 30s
+    unit_of_measurement: "°C"
+    device_class: temperature
+
+panaac_v2:
+  name: "Remote Controller"
+  id: panaac_v2_climate
+  receiver_id: ir_receiver
+  transmitter_id: ir_transmitter
+  topic_prefix: "panaac_v2/${device_name}"
+  hide_legacy_comps: false
+  supports_cool: true
+  supports_heat: true
+  supports_fan_only: true
+  supports_quiet: true
+  supports_powerful: true
+  supports_eco: true
+  fan_5level: true
+  swing_horizontal: true
+  temp_step: 0.5
+  ir_control: true
+  sensor: room_temp
